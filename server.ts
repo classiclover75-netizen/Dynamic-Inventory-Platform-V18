@@ -461,35 +461,46 @@ async function cleanupOrphanImages(oldRows: any[], newRows: any[], skipDbCheck =
 
   if (candidates.size === 0) return;
 
-  const otherUsedFiles = new Set<string>();
   const oldRowIds = new Set(oldRows.map(r => String(r.id)));
 
   if (!skipDbCheck) {
+    const processRows = (rows: any[]) => {
+      for (const row of rows) {
+        const tempSet = new Set<string>();
+        extractFiles([row], tempSet);
+        for (const file of candidates) {
+          if (tempSet.has(file)) {
+            candidates.delete(file);
+          }
+        }
+        if (candidates.size === 0) return true;
+      }
+      return false;
+    };
+
     if (isUsingMongoDB) {
       if (excludePageName) {
         const remainingRecords = await getSortedPageRows({ pageName: { $ne: excludePageName } });
-        extractFiles(remainingRecords.map((r: any) => r.data), otherUsedFiles);
+        processRows(remainingRecords.map((r: any) => r.data));
       } else {
         const allRecords = await getSortedPageRows({});
         const remainingRecords = allRecords.filter((r: any) => !oldRowIds.has(String(r.data.id)));
-        extractFiles(remainingRecords.map((r: any) => r.data), otherUsedFiles);
+        processRows(remainingRecords.map((r: any) => r.data));
       }
     } else {
       const db = await getLocalDB();
-      db.pages.forEach((p: any) => {
-        if (excludePageName && p.name === excludePageName) return;
+      for (const p of db.pages) {
+        if (excludePageName && p.name === excludePageName) continue;
         if (p.rows) {
           const remainingRows = excludePageName ? p.rows : p.rows.filter((r: any) => !oldRowIds.has(String(r.id)));
-          extractFiles(remainingRows, otherUsedFiles);
+          if (processRows(remainingRows)) break;
         }
-      });
+      }
     }
   }
 
   candidates.forEach(file => {
-    if (!otherUsedFiles.has(file)) {
-      deleteImageFile(file);
-    }
+    deleteImageFile(file);
   });
 }
 
@@ -1940,7 +1951,6 @@ app.delete('/api/pageRows/:name/:rowId', async (req, res) => {
   try {
     const { name, rowId } = req.params;
     let deletedRowData = null;
-    let allOtherRowsData: any[] = [];
 
     if (isUsingMongoDB) {
       const allRows = await PageRow.find({ pageName: name });
@@ -1950,9 +1960,6 @@ app.delete('/api/pageRows/:name/:rowId', async (req, res) => {
       }
       deletedRowData = rowToDelete.data;
       await PageRow.findByIdAndDelete(rowToDelete._id);
-      
-      const remainingRows = await getSortedPageRows({});
-      allOtherRowsData = remainingRows.map((r: any) => r.data);
       
       await triggerLocalBackup();
     } else {
@@ -1964,12 +1971,6 @@ app.delete('/api/pageRows/:name/:rowId', async (req, res) => {
         deletedRowData = rowToDelete;
         page.rows = page.rows.filter((r: any) => String(r.id) !== String(rowId));
         await saveLocalDB(db);
-        
-        db.pages.forEach((p: any) => {
-          if (p.rows) {
-            allOtherRowsData.push(...p.rows);
-          }
-        });
       }
     }
     
