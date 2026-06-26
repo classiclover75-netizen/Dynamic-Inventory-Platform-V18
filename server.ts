@@ -1647,9 +1647,31 @@ app.put('/api/pageRows/:name', async (req, res) => {
       const isTracker = pageConfig?.config?.linkedSourcePage;
       const newRows = isTracker ? rowsToProcess : await processRowsConcurrently(rowsToProcess, 50, forceSave);
       
-      await PageRow.deleteMany({ pageName: name });
-      if (newRows.length > 0) {
-        await PageRow.insertMany(newRows.map((row: any) => ({ pageName: name, data: row })));
+      let session = null;
+      try {
+        session = await mongoose.startSession();
+        session.startTransaction();
+
+        await PageRow.deleteMany({ pageName: name }, { session });
+        if (newRows.length > 0) {
+          await PageRow.insertMany(newRows.map((row: any) => ({ pageName: name, data: row })), { session });
+        }
+
+        await session.commitTransaction();
+      } catch (txnErr: any) {
+        if (session) {
+          await session.abortTransaction().catch(() => {});
+        }
+        console.warn("Transaction failed or not supported, falling back to sequential delete/insert:", txnErr.message);
+        
+        await PageRow.deleteMany({ pageName: name });
+        if (newRows.length > 0) {
+          await PageRow.insertMany(newRows.map((row: any) => ({ pageName: name, data: row })));
+        }
+      } finally {
+        if (session) {
+          session.endSession();
+        }
       }
       await triggerLocalBackup();
     } else {
