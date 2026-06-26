@@ -1762,13 +1762,33 @@ app.patch('/api/pageRows/:name/bulk', async (req, res) => {
 
     if (isUsingMongoDB) {
       if (updates && Object.keys(updates).length > 0) {
+        const rowIds = Object.keys(updates).map(String);
+        const rowsToUpdate = await PageRow.find({ pageName: name, 'data.id': { $in: rowIds } });
+        
+        const rowMap = new Map();
+        for (const r of rowsToUpdate) {
+          if (r.data && r.data.id != null) {
+            rowMap.set(String(r.data.id), r);
+          }
+        }
+
+        const bulkOps = [];
         for (const [rowId, upds] of Object.entries(updates)) {
-          const rowToUpdate = await PageRow.findOne({ pageName: name, 'data.id': String(rowId) });
+          const rowToUpdate = rowMap.get(String(rowId));
           if (rowToUpdate) {
             const newRowData = { ...rowToUpdate.data, ...(upds as any) };
             const processedRow = await processRowImages(newRowData, forceSave);
-            await PageRow.findByIdAndUpdate(rowToUpdate._id, { data: processedRow });
+            bulkOps.push({
+              updateOne: {
+                filter: { _id: rowToUpdate._id },
+                update: { $set: { data: processedRow } }
+              }
+            });
           }
+        }
+        
+        if (bulkOps.length > 0) {
+          await PageRow.bulkWrite(bulkOps);
         }
       }
       if (order && Array.isArray(order) && order.length > 0) {
