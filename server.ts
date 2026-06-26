@@ -28,6 +28,37 @@ const ALLOWED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', '
 app.use(cors());
 app.use(express.json({ limit: '1000mb' }));
 app.use(express.urlencoded({ limit: '1000mb', extended: true }));
+
+app.get('/uploads/thumb/:filename', async (req, res, next) => {
+  try {
+    const { filename } = req.params;
+    const originalPath = path.join(UPLOADS_DIR, filename);
+    const thumbFilename = `thumb_${filename}`;
+    const thumbPath = path.join(UPLOADS_DIR, thumbFilename);
+
+    if (!fs.existsSync(originalPath)) {
+      return res.status(404).send('Not found');
+    }
+
+    if (fs.existsSync(thumbPath)) {
+      return res.sendFile(thumbPath);
+    }
+
+    try {
+      await sharp(originalPath)
+        .resize({ width: 150, height: 150, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 70 })
+        .toFile(thumbPath);
+      return res.sendFile(thumbPath);
+    } catch (sharpErr) {
+      console.error('Thumbnail generation failed, serving original:', sharpErr);
+      return res.sendFile(originalPath);
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.use('/uploads', express.static(UPLOADS_DIR));
 
 // MongoDB Connection with Retry
@@ -319,6 +350,18 @@ async function processRowImages(row: any, forceSave = false, providedCache?: Map
           const filename = `${safeId}_${uuidv4().substring(0,8)}.${ext}`;
           const filepath = path.join(UPLOADS_DIR, filename);
           await fs.promises.writeFile(filepath, buffer);
+          
+          try {
+            const thumbFilename = `thumb_${filename}`;
+            const thumbPath = path.join(UPLOADS_DIR, thumbFilename);
+            await sharp(buffer)
+              .resize({ width: 150, height: 150, fit: 'inside', withoutEnlargement: true })
+              .jpeg({ quality: 70 })
+              .toFile(thumbPath);
+          } catch (e) {
+            console.error("Failed to generate thumb on upload:", e);
+          }
+          
           return filename;
         })();
 
@@ -1558,6 +1601,83 @@ app.patch('/api/pageRows/:name/:rowId', async (req, res) => {
     }
     console.error("PATCH Row Error:", err);
     res.status(400).json({ error: err.message || 'Failed to update row' });
+  }
+});
+
+app.patch('/api/pageRows/:name/bulk', async (req, res) => {
+  try {
+    const { name } = req.params;
+    const { order, updates } = req.body;
+    const forceSave = req.query.force === 'true';
+
+    if (isUsingMongoDB) {
+      if (updates && Object.keys(updates).length > 0) {
+        for (const [rowId, upds] of Object.entries(updates)) {
+          const rowToUpdate = await PageRow.findOne({ pageName: name, 'data.id': String(rowId) });
+          if (rowToUpdate) {
+            const newRowData = { ...rowToUpdate.data, ...(upds as any) };
+            const processedRow = await processRowImages(newRowData, forceSave);
+            await PageRow.findByIdAndUpdate(rowToUpdate._id, { data: processedRow });
+          }
+        }
+      }
+      if (order && Array.isArray(order)) {
+        const existingRows = await PageRow.find({ pageName: name });
+        const rowMap = new Map(existingRows.map(r => [String(r.data.id), r]));
+        const newOrderedRows = [];
+        for (const id of order) {
+          if (rowMap.has(id)) {
+            newOrderedRows.push(rowMap.get(id));
+            rowMap.delete(id);
+          }
+        }
+        for (const r of rowMap.values()) {
+           newOrderedRows.push(r);
+        }
+        await PageRow.deleteMany({ pageName: name });
+        await PageRow.insertMany(newOrderedRows.map(r => ({ pageName: name, data: r.data })));
+      }
+      await triggerLocalBackup();
+    } else {
+      const db = await getLocalDB();
+      const page = db.pages.find((p: any) => p.name === name);
+      if (!page) return res.status(404).json({ error: 'Page not found' });
+
+      if (updates && Object.keys(updates).length > 0) {
+        for (const [rowId, upds] of Object.entries(updates)) {
+          const idx = page.rows?.findIndex((r: any) => String(r.id) === String(rowId));
+          if (idx !== undefined && idx !== -1) {
+            const newRowData = { ...page.rows[idx], ...(upds as any) };
+            const processedRow = await processRowImages(newRowData, forceSave);
+            page.rows[idx] = processedRow;
+          }
+        }
+      }
+
+      if (order && Array.isArray(order)) {
+        const rowMap = new Map((page.rows || []).map((r: any) => [String(r.id), r]));
+        const newOrderedRows = [];
+        for (const id of order) {
+          if (rowMap.has(id)) {
+            newOrderedRows.push(rowMap.get(id));
+            rowMap.delete(id);
+          }
+        }
+        for (const r of rowMap.values()) {
+           newOrderedRows.push(r);
+        }
+        page.rows = newOrderedRows;
+      }
+      await saveLocalDB(db);
+    }
+
+    res.json({ success: true });
+  } catch (err: any) {
+    if (err.message === 'SHARP_UNSUPPORTED_FORMAT') {
+      return res.status(400).json({ requiresConfirmation: true, error: "Unsupported image format detected. Do you want to force save this file as-is without processing?" });
+    }
+    console.error("PATCH Bulk Error:", err);
+    res.status(400).json({ error: err.message || 'Failed to bulk update' });
   }
 });
 

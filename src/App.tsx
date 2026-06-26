@@ -370,17 +370,31 @@ function AppContent() {
     }
   };
 
-  const getImageUrl = (val: any) => {
+  const getImageUrl = (val: any, isThumb = false) => {
     if (!val) return "";
     const imgData = typeof val === "object" && val !== null ? val.data : val;
     if (!imgData) return "";
+
     if (
       typeof imgData === "string" &&
-      (imgData.startsWith("data:image") || /^https?:\/\//i.test(imgData) || imgData.startsWith("/uploads/"))
+      (imgData.startsWith("data:image") || /^https?:\/\//i.test(imgData))
     ) {
+      if (isThumb && imgData.includes('/uploads/')) {
+        const filename = imgData.split('/uploads/').pop()?.split('?')[0];
+        if (filename) return `/uploads/thumb/${filename}`;
+      }
       return imgData;
     }
-    return `/uploads/${imgData}`;
+
+    if (typeof imgData === "string" && imgData.startsWith("/uploads/")) {
+      if (isThumb) {
+        const filename = imgData.split('/uploads/').pop()?.split('?')[0];
+        if (filename) return `/uploads/thumb/${filename}`;
+      }
+      return imgData;
+    }
+
+    return isThumb ? `/uploads/thumb/${imgData}` : `/uploads/${imgData}`;
   };
 
   const hoveredCellRef = useRef<HTMLTableCellElement | null>(null);
@@ -633,7 +647,7 @@ function AppContent() {
           ? prev
           : { ...prev, [state.activePage]: primarySearchInput },
       );
-    }, 300);
+    }, 250);
     return () => clearTimeout(timer);
   }, [primarySearchInput, state.activePage]);
 
@@ -646,7 +660,7 @@ function AppContent() {
             ? prev
             : { ...prev, [activeSecPage]: secondarySearchInput },
         );
-    }, 300);
+    }, 250);
     return () => clearTimeout(timer);
   }, [secondarySearchInput, activeSecPage]);
 
@@ -1253,10 +1267,10 @@ function AppContent() {
     }
 
     try {
-      await fetch(`/api/pageRows/${encodeURIComponent(targetPage)}`, {
-        method: "PUT",
+      await fetch(`/api/pageRows/${encodeURIComponent(targetPage)}/bulk`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows: newRows }),
+        body: JSON.stringify({ order: newRows.map(r => r.id) }),
       });
 
       setState((prev) => ({
@@ -2243,6 +2257,7 @@ function AppContent() {
     try {
       const rows = state.pageRows[pageName] || [];
       let hasChanges = false;
+      const updatesMap: any = {};
       const updatedRows = rows.map((r) => {
         if (!selectedRowIds.has(String(r.id))) return r;
 
@@ -2258,7 +2273,9 @@ function AppContent() {
         });
 
         if (rowModified) {
-          return { ...r, [colKey]: JSON.stringify(arr) };
+          const newVal = JSON.stringify(arr);
+          updatesMap[r.id] = { [colKey]: newVal };
+          return { ...r, [colKey]: newVal };
         }
         return r;
       });
@@ -2269,10 +2286,10 @@ function AppContent() {
         return;
       }
 
-      const res = await fetch(`/api/pageRows/${encodeURIComponent(pageName)}`, {
-        method: "PUT",
+      const res = await fetch(`/api/pageRows/${encodeURIComponent(pageName)}/bulk`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows: updatedRows }),
+        body: JSON.stringify({ updates: updatesMap }),
       });
 
       if (!res.ok) throw new Error("Failed to update bulk sources");
@@ -2633,6 +2650,46 @@ function AppContent() {
     });
   }, []);
 
+  const buildSearchIndex = useCallback((rows: any[], columns: any[]) => {
+    const indexMap = new Map();
+    rows.forEach(row => {
+      const colData = columns
+        .map((col) => {
+          if (col.key === "sr" || col.type === "image" || col.type === "file")
+            return null;
+          const val = row[col.key];
+          const strVal = Array.isArray(val)
+            ? val.join(" ")
+            : val !== null && val !== undefined
+              ? String(val)
+              : "";
+          const cleanVal = decodeHtmlEntities(strVal)
+            .replace(/<!--[\s\S]*?-->/g, "")
+            .replace(/<br\s*\/?>/gi, " ")
+            .replace(/&nbsp;/gi, " ")
+            .toLowerCase();
+          return { name: col.name.toLowerCase(), val: cleanVal };
+        })
+        .filter(Boolean) as { name: string; val: string }[];
+
+      const globalBlob = colData.map((c) => c.val).join(" ");
+      indexMap.set(row.id, { colData, globalBlob });
+    });
+    return indexMap;
+  }, []);
+
+  const primarySearchIndex = useMemo(() => {
+    return buildSearchIndex(activeRowsWithSum, activeColumnsWithSum);
+  }, [activeRowsWithSum, activeColumnsWithSum, buildSearchIndex]);
+
+  const secondarySearchIndex = useMemo(() => {
+    if (!activeConfig.secondarySearchPage) return new Map();
+    const secRows = state.pageRows[activeConfig.secondarySearchPage] || [];
+    const secConfig = state.pageConfigs[activeConfig.secondarySearchPage];
+    if (!secConfig) return new Map();
+    return buildSearchIndex(secRows, secConfig.columns);
+  }, [state.pageRows, state.pageConfigs, activeConfig.secondarySearchPage, buildSearchIndex]);
+
   const filteredRows = useMemo(() => {
     let rows = activeRowsWithSum;
     const activeQueries = [...primarySearchTags, currentSearch.trim()].filter(
@@ -2642,26 +2699,9 @@ function AppContent() {
       const compiledQueries = compileSearchQueries(activeQueries);
       
       rows = rows.filter((row) => {
-        const colData = activeColumnsWithSum
-          .map((col) => {
-            if (col.key === "sr" || col.type === "image" || col.type === "file")
-              return null;
-            const val = row[col.key];
-            const strVal = Array.isArray(val)
-              ? val.join(" ")
-              : val !== null && val !== undefined
-                ? String(val)
-                : "";
-            const cleanVal = decodeHtmlEntities(strVal)
-              .replace(/<!--[\s\S]*?-->/g, "")
-              .replace(/<br\s*\/?>/gi, " ")
-              .replace(/&nbsp;/gi, " ")
-              .toLowerCase();
-            return { name: col.name.toLowerCase(), val: cleanVal };
-          })
-          .filter(Boolean) as { name: string; val: string }[];
-
-        const globalBlob = colData.map((c) => c.val).join(" ");
+        const indexData = primarySearchIndex.get(row.id);
+        const colData = indexData ? indexData.colData : [];
+        const globalBlob = indexData ? indexData.globalBlob : "";
 
         return compiledQueries.some((cQuery) => {
           let targetBlob = globalBlob;
@@ -2775,26 +2815,9 @@ function AppContent() {
       const compiledQueries = compileSearchQueries(activeQueries);
       
       rows = rows.filter((row) => {
-        const colData = secConfig.columns
-          .map((col) => {
-            if (col.key === "sr" || col.type === "image" || col.type === "file")
-              return null;
-            const val = row[col.key];
-            const strVal = Array.isArray(val)
-              ? val.join(" ")
-              : val !== null && val !== undefined
-                ? String(val)
-                : "";
-            const cleanVal = decodeHtmlEntities(strVal)
-              .replace(/<!--[\s\S]*?-->/g, "")
-              .replace(/<br\s*\/?>/gi, " ")
-              .replace(/&nbsp;/gi, " ")
-              .toLowerCase();
-            return { name: col.name.toLowerCase(), val: cleanVal };
-          })
-          .filter(Boolean) as { name: string; val: string }[];
-
-        const globalBlob = colData.map((c) => c.val).join(" ");
+        const indexData = secondarySearchIndex.get(row.id);
+        const colData = indexData ? indexData.colData : [];
+        const globalBlob = indexData ? indexData.globalBlob : "";
 
         return compiledQueries.some((cQuery) => {
           let targetBlob = globalBlob;
@@ -3701,7 +3724,7 @@ function AppContent() {
                                       >
                                         {isImg ? (
                                           <img
-                                            src={getImageUrl(imgData)}
+                                            src={getImageUrl(imgData, true)}
                                             alt="img"
                                             loading="lazy"
                                             className="w-full h-full object-contain cursor-pointer block"
