@@ -22,15 +22,14 @@ describe("parseMultiSource", () => {
     ]);
   });
 
-  it("falls back to a single 'Default' entry with numeric qty for a legacy plain number/string", () => {
-    const result1 = parseMultiSource(42);
-    expect(result1).toEqual([
-      { source: "Default", qty: 42, color: "bg-gray-100 text-gray-800 border-gray-200" }
-    ]);
+  it("returns [] for a plain number or numeric string", () => {
+    expect(parseMultiSource(42)).toEqual([]);
+    expect(parseMultiSource("55")).toEqual([]);
+  });
 
-    const result2 = parseMultiSource("55");
-    expect(result2).toEqual([
-      { source: "Default", qty: 55, color: "bg-gray-100 text-gray-800 border-gray-200" }
+  it("returns a single Default entry for invalid JSON", () => {
+    expect(parseMultiSource("12abc")).toEqual([
+      { source: "Default", qty: 12, color: "bg-gray-100 text-gray-800 border-gray-200" }
     ]);
   });
 

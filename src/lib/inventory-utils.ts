@@ -19,17 +19,10 @@ export const parseMultiSource = (val: any) => {
 
   let result: any[];
   try {
-    if (typeof val === 'string' && val.trim().startsWith('[')) {
-      result = JSON.parse(val);
-      if (!Array.isArray(result)) result = [];
-      result = result.sort((a: any, b: any) => String(a.source || "").localeCompare(String(b.source || "")));
-    } else if (Array.isArray(val)) {
-      result = val.sort((a: any, b: any) => String(a.source || "").localeCompare(String(b.source || "")));
-    } else {
-      throw new Error("Not an array");
-    }
+    const parsed = typeof val === "string" ? JSON.parse(val) : val;
+    const arr = Array.isArray(parsed) ? parsed : [];
+    result = arr.sort((a: any, b: any) => String(a.source || "").localeCompare(String(b.source || "")));
   } catch (e) {
-    // Fallback for legacy flat numbers
     result = [
       {
         source: "Default",
@@ -38,7 +31,7 @@ export const parseMultiSource = (val: any) => {
       },
     ];
   }
-  
+
   try {
     if (typeof val === 'string' || typeof val === 'number') {
       if (parseMultiSourceCache.size > 5000) {
@@ -46,9 +39,7 @@ export const parseMultiSource = (val: any) => {
       }
       parseMultiSourceCache.set(val, result.map((item: any) => ({ ...item })));
     }
-  } catch (e) {
-    // Safety fallback
-  }
-  
+  } catch (e) {}
+
   return result.map((item: any) => ({ ...item }));
 };
