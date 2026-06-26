@@ -483,6 +483,59 @@ async function cleanupOrphanImages(oldRows: any[], newRows: any[], skipDbCheck =
   });
 }
 
+async function diskSweepOrphans(allNewRows: any[]) {
+  if (!fs.existsSync(UPLOADS_DIR)) return;
+  
+  const keepSet = new Set<string>();
+
+  const extractFiles = (rows: any[], set: Set<string>) => {
+    rows.forEach(row => {
+      Object.values(row).forEach(value => {
+        let val = value;
+        if (typeof value === 'object' && value !== null && typeof (value as any).data === 'string') {
+          val = (value as any).data;
+        }
+        if (typeof val === 'string') {
+          if (val.includes('/uploads/')) {
+            val = val.split('/uploads/').pop() || val;
+          }
+          let strVal = val as string;
+          strVal = strVal.split('?')[0]; // Remove cache busters if any
+          const ext = strVal.split('.').pop()?.toLowerCase() || '';
+          if (ALLOWED_IMAGE_EXTENSIONS.includes(ext) && !/^https?:\/\//i.test(strVal)) {
+            set.add(strVal);
+          }
+        }
+      });
+    });
+  };
+
+  extractFiles(allNewRows, keepSet);
+
+  try {
+    const filesOnDisk = fs.readdirSync(UPLOADS_DIR);
+    for (const file of filesOnDisk) {
+      if (file === '.gitkeep' || file === 'dummy.txt') continue;
+      
+      const ext = file.split('.').pop()?.toLowerCase() || '';
+      if (!ALLOWED_IMAGE_EXTENSIONS.includes(ext) && ext !== 'blob') {
+         continue; 
+      }
+
+      let originalName = file;
+      if (file.startsWith('thumb_')) {
+         originalName = file.substring(6);
+      }
+
+      if (!keepSet.has(originalName)) {
+        deleteImageFile(originalName);
+      }
+    }
+  } catch (err) {
+    console.error("diskSweepOrphans failed:", err);
+  }
+}
+
 // Mongoose Schema
 const pageSchema = new mongoose.Schema({
   name: { type: String, required: true, unique: true },
@@ -2023,6 +2076,7 @@ app.put('/api/state', async (req, res) => {
         }
         
         await cleanupOrphanImages(allOldRows, allNewRows, true);
+        await diskSweepOrphans(allNewRows);
 
         const snapPages = await Page.find({});
         const snapRows = await getSortedPageRows({});
@@ -2118,6 +2172,7 @@ app.put('/api/state', async (req, res) => {
           allNewRows.push(...processedPageRows[pageName]);
         }
         await cleanupOrphanImages(allOldRows, allNewRows, true);
+        await diskSweepOrphans(allNewRows);
 
         const oldDbCopy = JSON.parse(JSON.stringify(db));
 
@@ -2323,6 +2378,7 @@ app.post('/api/import-zip', upload.single('backup'), async (req, res) => {
         }
         
         await cleanupOrphanImages(allOldRows, allNewRows, true);
+        await diskSweepOrphans(allNewRows);
 
         // Clear existing data
         await Page.deleteMany({});
@@ -2390,6 +2446,7 @@ app.post('/api/import-zip', upload.single('backup'), async (req, res) => {
           allNewRows.push(...processedPageRows[pageName]);
         }
         await cleanupOrphanImages(allOldRows, allNewRows, true);
+        await diskSweepOrphans(allNewRows);
 
         const newDb = {
           pages: newState.pages.map((name: string) => ({
