@@ -56,6 +56,10 @@ app.get('/uploads/thumb/:filename', async (req, res, next) => {
       return res.status(404).send('Not found');
     }
 
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', 'inline');
+
     if (fs.existsSync(thumbPath)) {
       return res.sendFile(thumbPath);
     }
@@ -75,7 +79,13 @@ app.get('/uploads/thumb/:filename', async (req, res, next) => {
   }
 });
 
-app.use('/uploads', express.static(UPLOADS_DIR));
+app.use('/uploads', express.static(UPLOADS_DIR, {
+  setHeaders: (res, path, stat) => {
+    res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Disposition', 'inline');
+  }
+}));
 
 // MongoDB Connection with Retry
 let isUsingMongoDB = false;
