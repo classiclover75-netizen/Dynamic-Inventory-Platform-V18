@@ -157,7 +157,7 @@ async function syncDatabaseParity() {
     } else if (mongoPageCount > 0) {
       console.log('MongoDB has data. Writing/updating a backup copy to local db.json to maintain consistency...');
       const pages = await Page.find({});
-      const pageRows = await PageRow.find({});
+      const pageRows = await getSortedPageRows({});
       const settings = await AppSettings.findOne({});
       
       const localPagesList = [];
@@ -199,7 +199,7 @@ async function performLocalBackup() {
   isBackupRunning = true;
   try {
     const pages = await Page.find({});
-    const pageRows = await PageRow.find({});
+    const pageRows = await getSortedPageRows({});
     const settings = await AppSettings.findOne({});
     
     const localPagesList = [];
@@ -441,12 +441,12 @@ async function cleanupOrphanImages(oldRows: any[], newRows: any[], skipDbCheck =
   if (!skipDbCheck) {
     if (isUsingMongoDB) {
       if (excludePageName) {
-        const remainingRecords = await PageRow.find({ pageName: { $ne: excludePageName } });
-        extractFiles(remainingRecords.map(r => r.data), otherUsedFiles);
+        const remainingRecords = await getSortedPageRows({ pageName: { $ne: excludePageName } });
+        extractFiles(remainingRecords.map((r: any) => r.data), otherUsedFiles);
       } else {
-        const allRecords = await PageRow.find({});
-        const remainingRecords = allRecords.filter(r => !oldRowIds.has(String(r.data.id)));
-        extractFiles(remainingRecords.map(r => r.data), otherUsedFiles);
+        const allRecords = await getSortedPageRows({});
+        const remainingRecords = allRecords.filter((r: any) => !oldRowIds.has(String(r.data.id)));
+        extractFiles(remainingRecords.map((r: any) => r.data), otherUsedFiles);
       }
     } else {
       const db = await getLocalDB();
@@ -484,10 +484,59 @@ const Page = mongoose.model('Page', pageSchema);
 
 const pageRowSchema = new mongoose.Schema({
   pageName: { type: String, required: true },
+  order: { type: Number, default: () => Date.now() },
   data: { type: mongoose.Schema.Types.Mixed, required: true }
 });
+pageRowSchema.index({ pageName: 1, order: 1, 'data.id': 1 });
 pageRowSchema.index({ pageName: 1, 'data.id': 1 });
 const PageRow = mongoose.model('PageRow', pageRowSchema);
+
+// Helper function to safely get rows sorted, and perform one-time order migration if needed.
+async function getSortedPageRows(query: any = {}) {
+  const rows = await PageRow.find(query).sort({ pageName: 1, order: 1, _id: 1 }).lean();
+  
+  const pagesToMigrate = new Set<string>();
+  rows.forEach((r: any) => {
+    if (typeof r.order !== 'number') {
+      pagesToMigrate.add(r.pageName);
+    }
+  });
+
+  if (pagesToMigrate.size > 0) {
+    const bulkOps: any[] = [];
+    const pageGroups = new Map<string, any[]>();
+    
+    rows.forEach((r: any) => {
+      if (!pageGroups.has(r.pageName)) pageGroups.set(r.pageName, []);
+      pageGroups.get(r.pageName)!.push(r);
+    });
+    
+    for (const pageName of pagesToMigrate) {
+      const groupRows = pageGroups.get(pageName)!;
+      groupRows.forEach((r, index) => {
+        r.order = index;
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: r._id },
+            update: { $set: { order: index } }
+          }
+        });
+      });
+    }
+    
+    if (bulkOps.length > 0) {
+      try {
+        await PageRow.bulkWrite(bulkOps);
+        console.log(`Migrated order field for ${bulkOps.length} rows in pages: ${Array.from(pagesToMigrate).join(', ')}`);
+      } catch (e) {
+        console.error("Migration bulkWrite failed:", e);
+      }
+    }
+  }
+  
+  return rows;
+}
+
 
 const settingsSchema = new mongoose.Schema({
   globalCopyBoxes: mongoose.Schema.Types.Mixed,
@@ -698,7 +747,7 @@ app.post('/api/admin/migrate-images', async (_req, res) => {
     };
 
     if (isUsingMongoDB) {
-      const oldPageRows = await PageRow.find({});
+      const oldPageRows = await getSortedPageRows({});
       const pagesMap = new Map<string, any[]>();
       
       for (const pr of oldPageRows) {
@@ -754,8 +803,8 @@ app.get('/api/export/page/:name', async (req, res) => {
       if (!page) {
         return res.status(404).json({ error: 'Page not found' });
       }
-      const oldPageRows = await PageRow.find({ pageName: name });
-      const rows = oldPageRows.map(r => r.data);
+      const oldPageRows = await getSortedPageRows({ pageName: name });
+      const rows = oldPageRows.map((r: any) => r.data);
       
       pageData = {
         name: page.name,
@@ -790,7 +839,7 @@ app.get('/api/export', async (_req, res) => {
     let state: any = {};
     if (isUsingMongoDB) {
       const pages = await Page.find({});
-      const rows = await PageRow.find({});
+      const rows = await getSortedPageRows({});
       const settings: any = await AppSettings.findOne() || {};
       
       const pageConfigs: Record<string, any> = {};
@@ -850,7 +899,7 @@ app.get('/api/export-zip', async (_req, res) => {
     let state: any = {};
     if (isUsingMongoDB) {
       const pages = await Page.find({});
-      const rows = await PageRow.find({});
+      const rows = await getSortedPageRows({});
       const settings: any = await AppSettings.findOne() || {};
       
       const pageConfigs: Record<string, any> = {};
@@ -941,7 +990,7 @@ app.get('/api/export-zip-verified', async (_req, res) => {
     let state: any = {};
     if (isUsingMongoDB) {
       const pages = await Page.find({});
-      const rows = await PageRow.find({});
+      const rows = await getSortedPageRows({});
       const settings: any = await AppSettings.findOne() || {};
       
       const pageConfigs: Record<string, any> = {};
@@ -1089,18 +1138,18 @@ app.get('/api/export-zip/page/:name', async (req, res) => {
     if (isUsingMongoDB) {
       const page = await Page.findOne({ name });
       if (!page) return res.status(404).json({ error: 'Page not found' });
-      const rows = await PageRow.find({ pageName: name });
+      const rows = await getSortedPageRows({ pageName: name });
       const linkedPages = await Page.find({ "config.linkedSourcePage": name });
       
       const pages = [name];
       const pageConfigs: any = { [name]: page.config || {} };
-      const pageRows: any = { [name]: rows.map(r => r.data) };
+      const pageRows: any = { [name]: rows.map((r: any) => r.data) };
 
       for (const p of linkedPages) {
         pages.push(p.name);
         pageConfigs[p.name] = p.config || {};
-        const pRows = await PageRow.find({ pageName: p.name });
-        pageRows[p.name] = pRows.map(r => r.data);
+        const pRows = await getSortedPageRows({ pageName: p.name });
+        pageRows[p.name] = pRows.map((r: any) => r.data);
       }
 
       pageData = {
@@ -1276,12 +1325,12 @@ app.get('/api/pages/:name', async (req, res) => {
       const page = await Page.findOne({ name });
       if (!page) return res.status(404).json({ error: 'Page not found' });
       
-      const rows = await PageRow.find({ pageName: name });
+      const rows = await getSortedPageRows({ pageName: name });
       
       return res.json({
         name: page.name,
         config: page.config,
-        rows: rows.map(r => r.data)
+        rows: rows.map((r: any) => r.data)
       });
     } else {
       const db = await getLocalDB();
@@ -1355,15 +1404,15 @@ app.delete('/api/pages/:name', async (req, res) => {
     const { name } = req.params;
     let deletedRows: any[] = [];
     if (isUsingMongoDB) {
-      const pageRows = await PageRow.find({ pageName: name });
-      deletedRows = pageRows.map(r => r.data);
+      const pageRows = await getSortedPageRows({ pageName: name });
+      deletedRows = pageRows.map((r: any) => r.data);
       await Page.findOneAndDelete({ name });
       await PageRow.deleteMany({ pageName: name });
       
       const linkedPages = await Page.find({ "config.linkedSourcePage": name });
       for (const p of linkedPages) {
-        const linkedPageRows = await PageRow.find({ pageName: p.name });
-        deletedRows.push(...linkedPageRows.map(r => r.data));
+        const linkedPageRows = await getSortedPageRows({ pageName: p.name });
+        deletedRows.push(...linkedPageRows.map((r: any) => r.data));
         await Page.findOneAndDelete({ name: p.name });
         await PageRow.deleteMany({ pageName: p.name });
       }
@@ -1621,21 +1670,40 @@ app.patch('/api/pageRows/:name/bulk', async (req, res) => {
           }
         }
       }
-      if (order && Array.isArray(order)) {
-        const existingRows = await PageRow.find({ pageName: name });
-        const rowMap = new Map(existingRows.map(r => [String(r.data.id), r]));
-        const newOrderedRows = [];
-        for (const id of order) {
-          if (rowMap.has(id)) {
-            newOrderedRows.push(rowMap.get(id));
-            rowMap.delete(id);
+      if (order && Array.isArray(order) && order.length > 0) {
+        let session = null;
+        try {
+          session = await mongoose.startSession();
+          session.startTransaction();
+
+          const bulkOps = order.map((id, index) => ({
+            updateOne: {
+              filter: { pageName: name, 'data.id': String(id) },
+              update: { $set: { order: index } }
+            }
+          }));
+          
+          await PageRow.bulkWrite(bulkOps, { session });
+          
+          await session.commitTransaction();
+        } catch (txnErr: any) {
+          if (session) {
+            await session.abortTransaction().catch(() => {});
+          }
+          console.warn("Transaction failed or not supported, falling back to sequential bulkWrite:", txnErr.message);
+          
+          const bulkOps = order.map((id, index) => ({
+            updateOne: {
+              filter: { pageName: name, 'data.id': String(id) },
+              update: { $set: { order: index } }
+            }
+          }));
+          await PageRow.bulkWrite(bulkOps);
+        } finally {
+          if (session) {
+            session.endSession();
           }
         }
-        for (const r of rowMap.values()) {
-           newOrderedRows.push(r);
-        }
-        await PageRow.deleteMany({ pageName: name });
-        await PageRow.insertMany(newOrderedRows.map(r => ({ pageName: name, data: r.data })));
       }
       await triggerLocalBackup();
     } else {
@@ -1762,8 +1830,8 @@ app.delete('/api/pageRows/:name/:rowId', async (req, res) => {
       deletedRowData = rowToDelete.data;
       await PageRow.findByIdAndDelete(rowToDelete._id);
       
-      const remainingRows = await PageRow.find({});
-      allOtherRowsData = remainingRows.map(r => r.data);
+      const remainingRows = await getSortedPageRows({});
+      allOtherRowsData = remainingRows.map((r: any) => r.data);
       
       await triggerLocalBackup();
     } else {
@@ -1937,8 +2005,8 @@ app.put('/api/state', async (req, res) => {
         await triggerLocalBackup();
       } else {
         // Fetch all existing rows to cleanup images
-        const allOldPageRows = await PageRow.find({});
-        const allOldRows = allOldPageRows.map(r => r.data);
+        const allOldPageRows = await getSortedPageRows({});
+        const allOldRows = allOldPageRows.map((r: any) => r.data);
         
         const allNewRows: any[] = [];
         for (const pageName in processedPageRows) {
@@ -1948,7 +2016,7 @@ app.put('/api/state', async (req, res) => {
         await cleanupOrphanImages(allOldRows, allNewRows, true);
 
         const snapPages = await Page.find({});
-        const snapRows = await PageRow.find({});
+        const snapRows = await getSortedPageRows({});
         const snapSettings = await AppSettings.find({});
 
         try {
@@ -2237,8 +2305,8 @@ app.post('/api/import-zip', upload.single('backup'), async (req, res) => {
         }
       } else {
         // Fetch all existing rows to cleanup images
-        const allOldPageRows = await PageRow.find({});
-        const allOldRows = allOldPageRows.map(r => r.data);
+        const allOldPageRows = await getSortedPageRows({});
+        const allOldRows = allOldPageRows.map((r: any) => r.data);
         
         const allNewRows: any[] = [];
         for (const pageName in processedPageRows) {
