@@ -25,6 +25,22 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 
 const ALLOWED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'tiff', 'svg', 'heic'];
 
+function deleteImageFile(filename: string) {
+  try {
+    const originalPath = path.join(UPLOADS_DIR, filename);
+    if (fs.existsSync(originalPath)) {
+      fs.unlinkSync(originalPath);
+    }
+    const thumbFilename = `thumb_${filename}`;
+    const thumbPath = path.join(UPLOADS_DIR, thumbFilename);
+    if (fs.existsSync(thumbPath)) {
+      fs.unlinkSync(thumbPath);
+    }
+  } catch (err) {
+    console.error(`Failed to delete image file ${filename}:`, err);
+  }
+}
+
 app.use(cors());
 app.use(express.json({ limit: '1000mb' }));
 app.use(express.urlencoded({ limit: '1000mb', extended: true }));
@@ -462,14 +478,7 @@ async function cleanupOrphanImages(oldRows: any[], newRows: any[], skipDbCheck =
 
   candidates.forEach(file => {
     if (!otherUsedFiles.has(file)) {
-      try {
-        const filepath = path.join(UPLOADS_DIR, file);
-        if (fs.existsSync(filepath)) {
-          fs.unlinkSync(filepath);
-        }
-      } catch (err) {
-        console.error(`Failed to delete orphaned image ${file}:`, err);
-      }
+      deleteImageFile(file);
     }
   });
 }
