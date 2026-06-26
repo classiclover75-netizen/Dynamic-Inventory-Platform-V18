@@ -2164,6 +2164,9 @@ function AppContent() {
         if (!trackerConfig) continue;
         const trackerRows = [...(state.pageRows[trackerName] || [])];
         let updatedTracker = false;
+        
+        const updatesObj: Record<string, any> = {};
+        const appendRows: any[] = [];
 
         for (const newRow of newRows) {
           const tIdx = trackerRows.findIndex((r) => r.id === newRow.id);
@@ -2182,15 +2185,7 @@ function AppContent() {
                 preservedData[k] = existingTrackerRow[k];
             trackerRows[tIdx] = { ...newRow, ...preservedData };
 
-            await fetch(
-              `/api/pageRows/${encodeURIComponent(trackerName)}/${encodeURIComponent(newRow.id)}`,
-              {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ updates: trackerRows[tIdx] }),
-              },
-            );
-
+            updatesObj[newRow.id] = trackerRows[tIdx];
             updatedTracker = true;
           } else if (!wasEditing) {
             const newTrackerRow = {
@@ -2198,18 +2193,32 @@ function AppContent() {
               total_qty: "0",
             };
             trackerRows.push(newTrackerRow);
-
-            await fetch(
-              `/api/pageRows/${encodeURIComponent(trackerName)}/append`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ rows: [newTrackerRow] }),
-              },
-            );
-
+            
+            appendRows.push(newTrackerRow);
             updatedTracker = true;
           }
+        }
+        
+        if (Object.keys(updatesObj).length > 0) {
+          await fetch(
+            `/api/pageRows/${encodeURIComponent(trackerName)}/bulk`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ updates: updatesObj }),
+            },
+          );
+        }
+
+        if (appendRows.length > 0) {
+          await fetch(
+            `/api/pageRows/${encodeURIComponent(trackerName)}/append`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ rows: appendRows }),
+            },
+          );
         }
 
         if (updatedTracker) {
