@@ -1662,11 +1662,18 @@ app.put('/api/pageRows/:name', async (req, res) => {
         if (session) {
           await session.abortTransaction().catch(() => {});
         }
-        console.warn("Transaction failed or not supported, falling back to sequential delete/insert:", txnErr.message);
+        const errMsg = (txnErr.message || '').toLowerCase();
+        const isUnsupported = errMsg.includes('replica set') || errMsg.includes('transaction') || errMsg.includes('not supported') || txnErr.code === 20 || txnErr.code === 263 || txnErr.name === 'IllegalOperation';
         
-        await PageRow.deleteMany({ pageName: name });
-        if (newRows.length > 0) {
-          await PageRow.insertMany(newRows.map((row: any) => ({ pageName: name, data: row })));
+        if (isUnsupported) {
+          console.warn("Transaction not supported, falling back to sequential delete/insert:", txnErr.message);
+          
+          await PageRow.deleteMany({ pageName: name });
+          if (newRows.length > 0) {
+            await PageRow.insertMany(newRows.map((row: any) => ({ pageName: name, data: row })));
+          }
+        } else {
+          throw txnErr;
         }
       } finally {
         if (session) {
